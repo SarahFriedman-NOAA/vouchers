@@ -44,7 +44,7 @@ vessels <- tibble::tribble(
 #   )
 
 
-# ---- CAL ACADEMY DATA ---------------------------------------------------------
+# ---- CAL ACADEMY DATA --------------------------------------------------------
 
 museum_data <- readxl::read_xlsx("data/updates/voucher_inverts_cas_2024.xlsx") %>%
   janitor::clean_names() %>%
@@ -52,7 +52,16 @@ museum_data <- readxl::read_xlsx("data/updates/voucher_inverts_cas_2024.xlsx") %
     prev_no,
     into = c("cruise", "vessel", "haul", "voucher"),
     convert = TRUE
-  ) %>%
+  ) 
+
+
+# Double checking all cruise/vessel/haul combinations
+museum_data %>%
+  validate_haul(., all_haul)
+
+
+
+validated_museum_data <- museum_data %>%
   dplyr::mutate(
     collected_by = ifelse(
       grepl("aboard", determiner_last_name),
@@ -64,10 +73,11 @@ museum_data <- readxl::read_xlsx("data/updates/voucher_inverts_cas_2024.xlsx") %
     voucher     = ifelse(is.na(voucher), 1, voucher),
     disposition = "95% ETOH",
     notes       = ifelse(!is.na(remarks), paste0(notes, "; ", remarks), notes),
-    field_id    = purrr::map_chr(field_id_transcribed, check_species)
+    field_id    = validate_species(field_id_transcribed),
+    field_species_code = purrr::map_dbl(field_id, ~ get_species_code(.x)$species_code)
   ) %>%
   dplyr::select(
-    field_id,
+    field_id, field_species_code,
     new_id = full_name,
     cruise, vessel, haul, voucher,
     year, disposition, collected_by,
@@ -76,35 +86,38 @@ museum_data <- readxl::read_xlsx("data/updates/voucher_inverts_cas_2024.xlsx") %
   )
 
 
-
-
 # ==============================================================================
 # 4. HARMONIZE + BUILD VOUCHER TABLE
 # ==============================================================================
 
 message("Building unified voucher dataset...")
 
-new_vouch <- museum_data %>%   
+all_catch_species <- left_join(all_catch,
+  classification,
+  by = "species_code"
+) %>%
+  select(-family, -species_code)
+
+
+new_vouch <- validated_museum_data %>%
   dplyr::filter(!is.na(new_id)) %>%
   dplyr::mutate(
-    new_id       = purrr::map_chr(new_id, check_species),
-    species_code = purrr::map_dbl(new_id, ~ get_species_code(.x)$species_code)
+    new_id = validate_species(new_id),
+    new_species_code = purrr::map_dbl(new_id, ~ get_species_code(.x)$species_code)
   ) %>%
-  dplyr::left_join(all_catch, by = dplyr::join_by(cruise, haul, vessel, voucher)) %>%
+  dplyr::left_join(all_catch_species, by = dplyr::join_by(field_id == species_name, cruise, haul, vessel, voucher)) %>%
+  dplyr::left_join(all_haul, by = c(cruise, vessel, haul)) %>%
   dplyr::mutate(
     standard_length_mm = NA,
-    n_specimens        = NA,
-    date               = NA,
-    field_id           = ifelse(is.na(field_id.y), field_id.x, field_id.y)
+    n_specimens = NA,
+    id_date = NA
   ) %>%
-  dplyr::select(
-    field_id, cruise, year, region,
-    vessel_id = vessel, haul, voucher,
-    new_id, species_code, catalog_num,
-    standard_length_mm, n_specimens,
-    disposition, collected_by, date,
-    taxonomist, notes
-  )
+  dplyr::select(hauljoin, new_id, new_species_code, catalog_num, region,
+                cruise, year, vessel_id, haul, voucher, field_id,
+                field_species_code, n_specimens, standard_length_mm, 
+                weight_kg, preservative, collected_by, id_date, 
+                taxonomist, notes
+                )
 
 
 
@@ -112,19 +125,17 @@ new_vouch <- museum_data %>%
 # 5. QA CHECKS
 # ==============================================================================
 
-# Species resolution issues
+# Final IDs not in our database
 new_vouch %>%
   dplyr::filter(is.na(species_code)) %>%
   View()
 
-# Missing field IDs
-new_vouch %>%
-  dplyr::filter(is.na(field_id)) %>%
-  tidyr::nest(data = c(cruise, vessel_id, haul, new_id)) %>%
-  dplyr::mutate(field_id = purrr::map_chr(data, catch_lookup)) %>%
-  tidyr::unnest() %>%
-  View()
 
+# field IDs not in our database
+new_vouch %>%
+  left_join(taxonomy, by = c("field_id" = "species_name")) %>%
+  select(field_id, field_species_code) %>%
+  filter(is.na(field_species_code) & field_id != "NA")
 
 
 # ==============================================================================
@@ -150,6 +161,12 @@ vouchers <- new_vouch %>%
   ) %>%
   dplyr::rename_with(toupper) %>%
   dplyr::arrange(YEAR, REGION, CRUISE, VESSEL_ID, HAUL)
+
+
+# Check to ensure no duplicate catalog nums
+vouchers %>%
+  dplyr::filter(duplicated(catalog_num) & !is.na(catalog_num))
+
 
 
 # ------------------------------------------------------------------------------

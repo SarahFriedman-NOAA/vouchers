@@ -9,7 +9,7 @@
 # 4. Process museum requests and uploads
 
 year <- format(Sys.time(), "%Y") # year(s) for voucher extraction
-year <- c(2025, 2026)
+# year <- c(2025, 2026)
 
 override <- FALSE # toggle to override cached tables and download fresh
 
@@ -39,8 +39,8 @@ source("code/vouchers_to_oracle.R")
 # ------------------------------------------------------------------------------
 
 get_specimen_metadata(
-  input_file = "data requests/haul_data_request_2024.xlsx"
-)
+  input_file = "data requests/AFSC_2026_vouchers_data_cleanup.xlsx"
+  )
 
 
 # ------------------------------------------------------------------------------

@@ -28,13 +28,7 @@ source("code/00_functions.R")
 
 
 # Oracle connection --------------------------------------------------------
-oracle_file <- "Z:/Projects/ConnectToOracle.R"
-
-if (file.exists(oracle_file)) {
-  source(oracle_file)
-} else {
-  gapindex::get_connected()
-}
+channel <- connect_oracle()
 
 
 # Download Oracle data -------------------------------------------------------

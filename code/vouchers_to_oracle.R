@@ -11,7 +11,7 @@ last_year <- as.numeric(format(Sys.time(), "%Y")) - 1
 
 drive_name   <- paste0("voucher_data_", last_year, "_fish_edited")
 local_name   <- paste0("voucher_data_", last_year, "_fish_completed.csv")
-local_path   <- here::here("output", "completed", local_name)
+local_path   <- here::here("data", "updates", local_name)
 
 
 # ------------------------------------------------------------------------------
@@ -36,13 +36,17 @@ if (!file.exists(local_path)) {
 # ------------------------------------------------------------------------------
 
 new_fish_vouch <- readr::read_csv(local_path)
+hauljoin <- all_haul %>% select(hauljoin, cruise, vessel, haul)
 
 new_vouch <- new_fish_vouch %>%
   dplyr::filter(!is.na(new_id)) %>%                     # keep only resolved IDs
   dplyr::select(-field_family) %>%                      # drop unused column
   dplyr::mutate(
-    date   = as.Date(date, format = "%m/%d/%Y"),
-    new_id = purrr::map_chr(new_id, check_species)      # fix misspellings
+    id_date   = as.Date(id_date, format = "%m/%d/%Y"),
+    field_id = validate_species(field_id), # fix misspellings
+    new_id = validate_species(new_id), # fix misspellings
+    new_species_code = get_species_code(new_id),
+    voucher = replace_na(voucher, 1)
   ) %>%
   dplyr::left_join(
     taxonomy %>% dplyr::select(species_name, species_code),
@@ -57,6 +61,7 @@ new_vouch <- new_fish_vouch %>%
     n_specimens:notes
   ) %>%
   dplyr::arrange(new_id) %>%
+  dplyr::left_join(haul_join) %>%
   dplyr::rename_with(toupper)
 
 
@@ -75,15 +80,20 @@ stopifnot("Resolve species name issues before upload" = nrow(unresolved) == 0)
 # Combine new and existing voucher data
 # ------------------------------------------------------------------------------
 
-vouchers <- existing_vouch %>%
+vouchers <- tmp2 %>%
+  dplyr::select(hauljoin, new_id, new_species_code, catalog_num, region,
+                cruise, year, vessel_id, haul, voucher, field_id,
+                field_species_code, n_specimens, standard_length_mm, 
+                weight_kg, preservative, collected_by, id_date, 
+                taxonomist, notes
+  ) %>%
   rename_all(toupper) %>%
-  dplyr::bind_rows(new_vouch) %>%
   dplyr::distinct(
     FIELD_ID, REGION, CRUISE, VESSEL_ID, HAUL, VOUCHER, NEW_ID,
     .keep_all = TRUE
   ) %>%
   dplyr::mutate(
-    DATE = as.Date(DATE, format = "%m/%d/%Y")
+    ID_DATE = as.Date(ID_DATE, format = "%m/%d/%Y")
   ) %>%
   dplyr::arrange(
     dplyr::desc(CRUISE),
@@ -97,10 +107,10 @@ vouchers <- existing_vouch %>%
 # Establish Oracle connection (GAP products schema)
 # ------------------------------------------------------------------------------
 
-if (file.exists("Z:/Projects/ConnectToOracle_GAPproducts.R")) {
+if (file.exists("Z:/Projects/ConnectToOracle.R")) {
   
   message("Using local Oracle connection script.")
-  source("Z:/Projects/ConnectToOracle_GAPproducts.R")
+  source("Z:/Projects/ConnectToOracle.R")
   
 } else {
   
@@ -121,7 +131,7 @@ metadata <- tibble::tibble(
   dplyr::left_join(
     RODBC::sqlQuery(
       channel = channel,
-      query   = "SELECT * FROM GAP_PRODUCTS.METADATA_COLUMN"
+      query   = "SELECT * FROM RACE_DATA.METADATA_COLUMN"
     ),
     by = c("COLNAME" = "METADATA_COLNAME")
   ) %>%
@@ -138,6 +148,7 @@ metadata <- tibble::tibble(
 # ------------------------------------------------------------------------------
 
 metadata$datatype[metadata$colname == "weight_kg"] <- "NUMBER(38,3)"
+metadata$datatype[metadata$colname == "field_species_code"] <- "NUMBER(10,0)"
 metadata$datatype[metadata$colname == "notes"]     <- "VARCHAR2(4000 BYTE)"
 
 
@@ -153,7 +164,7 @@ gapindex::upload_oracle(
   table_metadata       = "Voucher table",
   metadata_column      = metadata,
   channel              = channel,
-  schema               = "GAP_PRODUCTS",
+  schema               = "RACE_DATA",
   share_with_all_users = TRUE
 )
 

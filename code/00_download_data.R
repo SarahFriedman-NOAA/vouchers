@@ -16,7 +16,7 @@ dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
 # Helper: check if cache is fresh
 # ------------------------------------------------------------------------------
 
-is_fresh <- function(path, max_age_days = cache_days, override) {
+is_fresh <- function(path, max_age_days = cache_days, override = override) {
   if (!file.exists(path) | override) return(FALSE)
   age <- as.numeric(Sys.time() - file.info(path)$mtime, units = "days")
   age <= max_age_days
@@ -38,9 +38,9 @@ run_query <- function(query, channel) {
 # Helper: cached query (read if fresh, otherwise download)
 # ------------------------------------------------------------------------------
 
-cached_query <- function(query, file, channel) {
+cached_query <- function(query, file, channel, override = override) {
   
-  if (is_fresh(file, override)) {
+  if (is_fresh(file, override = override)) {
     message("Reading cached: ", basename(file))
     return(readr::read_csv(file, show_col_types = FALSE))
   }
@@ -64,13 +64,15 @@ if (!exists("year"))    stop("`year` must be defined.")
 spec0 <- cached_query(
   "SELECT * FROM RACEBASE.SPECIES",
   file = file.path(cache_dir, "racebase-species.csv"),
-  channel
+  channel,
+  override
 )
 
 tax0 <- cached_query(
   "SELECT * FROM RACEBASE.SPECIES_CLASSIFICATION",
   file = file.path(cache_dir, "racebase-species_classification.csv"),
-  channel
+  channel,
+  override
 )
 
 
@@ -79,7 +81,7 @@ tax0 <- cached_query(
 # ------------------------------------------------------------------------------
 
 species0 <- spec0 %>%
-  dplyr::left_join(tax0, by = "SPECIES_CODE") %>%
+  dplyr::left_join(tax0, by = "species_code") %>%
   janitor::clean_names() %>%
   dplyr::select(
     species_code,
@@ -95,26 +97,26 @@ species0 <- spec0 %>%
 classification <- cached_query(
   "SELECT * FROM GAP_PRODUCTS.TAXONOMIC_CLASSIFICATION",
   file = file.path(cache_dir, "gap_products-taxonomic_classification.csv"),
-  channel
+  channel,
+  override
 ) %>%
   dplyr::rename_with(~ stringr::str_remove(.x, "_taxon")) %>%
   dplyr::filter(survey_species == 1) %>%
-  dplyr::select(species_name, species_code, family)
+  dplyr::select(species_name, common_name, species_code, family)
 
 
 changes <- cached_query(
   "SELECT * FROM GAP_PRODUCTS.TAXONOMIC_CHANGES",
   file = file.path(cache_dir, "gap_products-taxonomic_changes.csv"),
-  channel
+  channel,
+  override
 ) %>%
-  dplyr::left_join(classification, by = c("new_species_code" = "species_code")) %>%
-  dplyr::select(
-    species_name = old_species_name,
-    species_code = new_species_code,
-    family
-  )
+  dplyr::left_join(classification, by = c("new_species_code" = "species_code"))
 
-taxonomy <- dplyr::bind_rows(classification, changes)
+taxonomy <- dplyr::bind_rows(classification, 
+                             changes %>% select(species_name = old_species_name,
+                                                species_code = new_species_code)
+)
 
 
 
@@ -151,7 +153,8 @@ if (nrow(cruise0) == 0) {
 all_haul <- cached_query(
   "SELECT * FROM RACEBASE.HAUL",
   file = file.path(cache_dir, "racebase-haul.csv"),
-  channel
+  channel,
+  override
 ) %>%
   janitor::clean_names() %>%
   dplyr::mutate(
@@ -174,11 +177,15 @@ query_catch <- paste0(
   "AND voucher IS NOT NULL"
 )
 
-catch_year <- run_query(query_catch, channel) %>%
-  dplyr::left_join(
+catch_year <- run_query(query_catch, channel) 
+
+if(nrow(catch_year) > 0 ) {
+  catch_year <- catch_year %>%
+    dplyr::left_join(
     all_haul %>% dplyr::select(cruisejoin, hauljoin, bottom_depth),
     by = c("cruisejoin", "hauljoin")
   )
+} else rm(catch_year)
 
 
 # ------------------------------------------------------------------------------
@@ -188,7 +195,8 @@ catch_year <- run_query(query_catch, channel) %>%
 all_catch <- cached_query(
   "SELECT * FROM RACEBASE.CATCH",
   file = file.path(cache_dir, "racebase-catch.csv"),
-  channel
+  channel,
+  override
 )
 
 
@@ -197,8 +205,9 @@ all_catch <- cached_query(
 # ------------------------------------------------------------------------------
 
 existing_vouch <- cached_query(
-  "SELECT * FROM GAP_PRODUCTS.VOUCHERS",
-  file = file.path(cache_dir, "gap_products-vouchers.csv"),
-  channel
+  "SELECT * FROM RACE_DATA.VOUCHERS",
+  file = file.path(cache_dir, "race-data-vouchers.csv"),
+  channel,
+  override
 ) %>%
   dplyr::arrange(dplyr::desc(year))

@@ -27,7 +27,7 @@ vouch_data <- catch_year %>%
     standard_length_mm  = NA,
     preservative        = NA,
     collected_by        = NA,
-    date                = NA,
+    id_date             = NA,
     taxonomist          = NA,
     notes               = NA
   )
@@ -40,6 +40,7 @@ vouch_data <- catch_year %>%
 vouch_data_fish <- vouch_data %>%
   dplyr::filter(taxon == "fish") %>%   # currently only processing fish
   dplyr::select(
+    field_species_code = species_code,
     field_id       = species,
     field_family   = family,
     region,
