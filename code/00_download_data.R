@@ -16,8 +16,8 @@ dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
 # Helper: check if cache is fresh
 # ------------------------------------------------------------------------------
 
-is_fresh <- function(path, max_age_days = cache_days, override = override) {
-  if (!file.exists(path) | override) return(FALSE)
+is_fresh <- function(path, max_age_days = cache_days, override = FALSE) {
+  if (!file.exists(path) || override) return(FALSE)
   age <- as.numeric(Sys.time() - file.info(path)$mtime, units = "days")
   age <= max_age_days
 }
@@ -38,9 +38,8 @@ run_query <- function(query, channel) {
 # Helper: cached query (read if fresh, otherwise download)
 # ------------------------------------------------------------------------------
 
-cached_query <- function(query, file, channel, override = override) {
-  
-  if (is_fresh(file, override = override)) {
+cached_query <- function(query, file, channel, override = FALSE, max_age_days = cache_days) {
+  if (is_fresh(file, max_age_days = max_age_days, override = override)) {
     message("Reading cached: ", basename(file))
     return(readr::read_csv(file, show_col_types = FALSE))
   }
@@ -57,8 +56,7 @@ cached_query <- function(query, file, channel, override = override) {
 # 1. CORE TABLES (CACHED)
 # ==============================================================================
 
-if (!exists("channel")) stop("Oracle connection `channel` not found.")
-if (!exists("year"))    stop("`year` must be defined.")
+if (!exists("target_year"))    stop("`target_year` must be defined.")
 
 # Species tables
 spec0 <- cached_query(
@@ -95,19 +93,19 @@ species0 <- spec0 %>%
 # ------------------------------------------------------------------------------
 
 classification <- cached_query(
-  "SELECT * FROM GAP_PRODUCTS.TAXONOMIC_CLASSIFICATION",
-  file = file.path(cache_dir, "gap_products-taxonomic_classification.csv"),
+  "SELECT * FROM GAP_TAXONOMY.TAXONOMIC_CLASSIFICATION",
+  file = file.path(cache_dir, "gap_taxonomy-taxonomic_classification.csv"),
   channel,
   override
 ) %>%
   dplyr::rename_with(~ stringr::str_remove(.x, "_taxon")) %>%
-  dplyr::filter(survey_species == 1) %>%
+  dplyr::filter(active == 1) %>%
   dplyr::select(species_name, common_name, species_code, family)
 
 
 changes <- cached_query(
-  "SELECT * FROM GAP_PRODUCTS.TAXONOMIC_CHANGES",
-  file = file.path(cache_dir, "gap_products-taxonomic_changes.csv"),
+  "SELECT * FROM GAP_TAXONOMY.TAXONOMIC_CHANGES",
+  file = file.path(cache_dir, "gap_taxonomy-taxonomic_changes.csv"),
   channel,
   override
 ) %>%
@@ -126,10 +124,10 @@ taxonomy <- dplyr::bind_rows(classification,
 
 survey_def_ids <- c(52, 47, 98, 78, 143)
 
-year_filter <- if (length(year) > 1) {
-  paste0("year IN (", paste(year, collapse = ", "), ")")
+year_filter <- if (length(target_year) > 1) {
+  paste0("year IN (", paste(target_year, collapse = ", "), ")")
 } else {
-  paste0("year = ", year)
+  paste0("year = ", target_year)
 }
 
 query_cruise <- paste0(
@@ -185,7 +183,10 @@ if(nrow(catch_year) > 0 ) {
     all_haul %>% dplyr::select(cruisejoin, hauljoin, bottom_depth),
     by = c("cruisejoin", "hauljoin")
   )
-} else rm(catch_year)
+} else {
+  rm(catch_year)
+  message("No catch records found for the specified year(s).")
+  }
 
 
 # ------------------------------------------------------------------------------
@@ -201,13 +202,15 @@ all_catch <- cached_query(
 
 
 # ------------------------------------------------------------------------------
-# Existing vouchers (cached)
+# Existing vouchers 
 # ------------------------------------------------------------------------------
 
 existing_vouch <- cached_query(
   "SELECT * FROM RACE_DATA.VOUCHERS",
   file = file.path(cache_dir, "race-data-vouchers.csv"),
+  max_age_days = 0,
   channel,
   override
 ) %>%
   dplyr::arrange(dplyr::desc(year))
+

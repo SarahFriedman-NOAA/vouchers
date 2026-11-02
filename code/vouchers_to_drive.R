@@ -12,7 +12,7 @@
 vouch_data <- catch_year %>%
   dplyr::left_join(species0, by = "species_code") %>%
   dplyr::mutate(
-    year = year,
+    year = target_year,
     
     # Classify taxon group based on species_code ranges
     taxon = dplyr::case_when(
@@ -55,7 +55,7 @@ vouch_data_fish <- vouch_data %>%
     standard_length_mm,
     preservative,
     collected_by,
-    date,
+    id_date,
     taxonomist,
     notes
   ) %>%
@@ -66,7 +66,7 @@ vouch_data_fish <- vouch_data %>%
 # Write raw voucher file locally
 # ------------------------------------------------------------------------------
 
-fish_file <- paste0("voucher_data_", year, "_fish_raw.csv")
+fish_file <- paste0("voucher_data_", target_year, "_fish_raw.csv")
 
 readr::write_csv(
   vouch_data_fish,
@@ -92,21 +92,21 @@ googledrive::drive_auth()
 # Define file + folder structure
 # ------------------------------------------------------------------------------
 
-raw_folder_id  <- "1SBS4_B621j5MNNdJ6_0xavYgwyxoa8M9"
-edit_folder_id <- "1zrUUo5lm6Xgd0ovXi9R4RYoW-1o4M73y"
+raw_drive_name  <- paste0("voucher_data_", target_year, "_fish_raw")
+edit_drive_name <- paste0("voucher_data_", target_year, "_fish_edited")
 
 # Expected edited filename
-edited_file <- paste0("voucher_data_", year, "_fish_edited.csv")
+edited_file <- paste0("voucher_data_", target_year, "_fish_edited.csv")
 
 
 # ------------------------------------------------------------------------------
 # Check existing files on Drive
 # ------------------------------------------------------------------------------
 
-raw_drive_files <- googledrive::drive_ls(path = googledrive::as_id(raw_folder_id)) %>%
+raw_drive_files <- googledrive::drive_ls(path = googledrive::as_id(raw_drive_name)) %>%
   purrr::pluck("name")
 
-edit_drive_files <- googledrive::drive_ls(path = googledrive::as_id(edit_folder_id)) %>%
+edit_drive_files <- googledrive::drive_ls(path = googledrive::as_id(edit_drive_name)) %>%
   purrr::pluck("name")
 
 
@@ -115,15 +115,14 @@ edit_drive_files <- googledrive::drive_ls(path = googledrive::as_id(edit_folder_
 # Upload raw CSV if not already present
 # ------------------------------------------------------------------------------
 
-if (!fish_file %in% raw_drive_files) {
-  
+if (!raw_drive_name %in% raw_drive_files) {  
   message("Uploading raw voucher file to Drive...")
   
   googledrive::drive_upload(
     media    = here::here("output", "raw", fish_file),
-    path     = googledrive::as_id(raw_folder_id),
+    path     = googledrive::as_id(raw_drive_name),
     type     = "csv",
-    name     = paste0("voucher_data_", year, "_fish_raw"),
+    name     = paste0("voucher_data_", target_year, "_fish_raw"),
     overwrite = FALSE
   )
 }
@@ -133,15 +132,14 @@ if (!fish_file %in% raw_drive_files) {
 # Upload editable Google Sheet version if not already present
 # ------------------------------------------------------------------------------
 
-if (!edited_file %in% edit_drive_files) {
-  
+if (!edit_drive_name %in% edit_drive_files) {  
   message("Uploading editable voucher file to Drive...")
   
   googledrive::drive_upload(
     media     = here::here("output", "raw", fish_file),
-    path      = googledrive::as_id(edit_folder_id),
+    path      = googledrive::as_id(edit_drive_name),
     type      = "spreadsheet",
-    name      = paste0("voucher_data_", year, "_fish_edited"),
+    name      = paste0("voucher_data_", target_year, "_fish_edited"),
     overwrite = FALSE
   )
 }

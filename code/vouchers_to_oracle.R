@@ -1,5 +1,5 @@
 # ==============================================================================
-# UPLOAD COMPLETED VOUCHER DATA TO ORACLE
+# UPLOAD COMPLETED VOUCHER DATA TO RACE_DATA.VOUCHERS
 # ==============================================================================
 
 
@@ -9,9 +9,9 @@
 
 last_year <- as.numeric(format(Sys.time(), "%Y")) - 1
 
-drive_name   <- paste0("voucher_data_", last_year, "_fish_edited")
-local_name   <- paste0("voucher_data_", last_year, "_fish_completed.csv")
-local_path   <- here::here("data", "updates", local_name)
+drive_name <- paste0("voucher_data_", last_year, "_fish_edited")
+local_name <- paste0("voucher_data_", last_year, "_fish_completed.csv")
+local_path <- here::here("data", "updates", local_name)
 
 
 # ------------------------------------------------------------------------------
@@ -19,9 +19,8 @@ local_path   <- here::here("data", "updates", local_name)
 # ------------------------------------------------------------------------------
 
 if (!file.exists(local_path)) {
-  
   message("Downloading completed voucher file from Google Drive...")
-  
+
   googledrive::drive_download(
     file      = drive_name,
     path      = local_path,
@@ -34,35 +33,32 @@ if (!file.exists(local_path)) {
 # ------------------------------------------------------------------------------
 # Read and clean new voucher data
 # ------------------------------------------------------------------------------
-
 new_fish_vouch <- readr::read_csv(local_path)
-hauljoin <- all_haul %>% select(hauljoin, cruise, vessel, haul)
+
+# Haul lookup (hauljoin, and region if all_haul carries it)
+haul_lookup <- all_haul %>%
+  dplyr::select(hauljoin, cruise, vessel_id = vessel, haul, dplyr::any_of("region"))
+
+# Species lookups from taxonomy
+tax <- taxonomy %>% dplyr::select(species_name, species_code)
 
 new_vouch <- new_fish_vouch %>%
-  dplyr::filter(!is.na(new_id)) %>%                     # keep only resolved IDs
-  dplyr::select(-field_family) %>%                      # drop unused column
+  dplyr::filter(!is.na(new_id)) %>% # keep only resolved IDs
+  dplyr::select(-dplyr::any_of(c(
+    "field_family", "species_code", "new_species_code", "field_species_code",
+    "hauljoin", intersect("region", names(haul_lookup))
+  ))) %>%
+  dplyr::rename(dplyr::any_of(c(vessel_id = "vessel"))) %>%
   dplyr::mutate(
-    id_date   = as.Date(id_date, format = "%m/%d/%Y"),
+    id_date  = as.Date(id_date, format = "%m/%d/%Y"),
     field_id = validate_species(field_id), # fix misspellings
-    new_id = validate_species(new_id), # fix misspellings
+    field_species_code = get_species_code(field_id),
+    new_id   = validate_species(new_id), # fix misspellings
     new_species_code = get_species_code(new_id),
-    voucher = replace_na(voucher, 1)
+    voucher  = tidyr::replace_na(voucher, 1),
+    year     = as.numeric(stringr::str_extract(as.character(cruise), "^[0-9]{4}"))
   ) %>%
-  dplyr::left_join(
-    taxonomy %>% dplyr::select(species_name, species_code),
-    by = c("new_id" = "species_name")
-  ) %>%
-  dplyr::select(
-    field_id:new_id,
-    any_of(c(
-      "species_code",
-      "catalog_num"
-    )),
-    n_specimens:notes
-  ) %>%
-  dplyr::arrange(new_id) %>%
-  dplyr::left_join(haul_join) %>%
-  dplyr::rename_with(toupper)
+  dplyr::left_join(haul_lookup, by = c("cruise", "vessel_id", "haul"))
 
 
 # ------------------------------------------------------------------------------
@@ -70,102 +66,37 @@ new_vouch <- new_fish_vouch %>%
 # ------------------------------------------------------------------------------
 
 unresolved <- new_vouch %>%
-  dplyr::filter(is.na(SPECIES_CODE))
+  dplyr::filter(is.na(new_species_code))
 
 stopifnot("Resolve species name issues before upload" = nrow(unresolved) == 0)
 
-
-
-# ------------------------------------------------------------------------------
-# Combine new and existing voucher data
-# ------------------------------------------------------------------------------
-
-vouchers <- tmp2 %>%
-  dplyr::select(hauljoin, new_id, new_species_code, catalog_num, region,
-                cruise, year, vessel_id, haul, voucher, field_id,
-                field_species_code, n_specimens, standard_length_mm, 
-                weight_kg, preservative, collected_by, id_date, 
-                taxonomist, notes
-  ) %>%
-  rename_all(toupper) %>%
-  dplyr::distinct(
-    FIELD_ID, REGION, CRUISE, VESSEL_ID, HAUL, VOUCHER, NEW_ID,
-    .keep_all = TRUE
-  ) %>%
-  dplyr::mutate(
-    ID_DATE = as.Date(ID_DATE, format = "%m/%d/%Y")
-  ) %>%
-  dplyr::arrange(
-    dplyr::desc(CRUISE),
-    VESSEL_ID,
-    HAUL
-  )
-
-
-
-# ------------------------------------------------------------------------------
-# Establish Oracle connection (GAP products schema)
-# ------------------------------------------------------------------------------
-
-if (file.exists("Z:/Projects/ConnectToOracle.R")) {
-  
-  message("Using local Oracle connection script.")
-  source("Z:/Projects/ConnectToOracle.R")
-  
-} else {
-  
-  message("Using gapindex::get_connected() fallback.")
-  gapindex::get_connected()
+if (any(is.na(new_vouch$hauljoin))) {
+  warning(sum(is.na(new_vouch$hauljoin)), " rows have no matching hauljoin in all_haul.")
 }
 
 
-
 # ------------------------------------------------------------------------------
-# Construct table metadata for upload
+# Format to Oracle layout
 # ------------------------------------------------------------------------------
 
-metadata <- tibble::tibble(
-  COLNAME  = colnames(vouchers),
-  datatype = oracle_datatypes(vouchers)
-) %>%
-  dplyr::left_join(
-    RODBC::sqlQuery(
-      channel = channel,
-      query   = "SELECT * FROM RACE_DATA.METADATA_COLUMN"
-    ),
-    by = c("COLNAME" = "METADATA_COLNAME")
-  ) %>%
-  dplyr::rename_with(~ stringr::str_remove(.x, "METADATA_")) %>%
-  dplyr::mutate(
-    DATATYPE = dplyr::if_else(is.na(DATATYPE), datatype, DATATYPE)
-  ) %>%
-  dplyr::select(-datatype) %>%
-  janitor::clean_names() 
+vouchers <- format_vouchers(new_vouch)
 
 
 # ------------------------------------------------------------------------------
-# Apply manual datatype overrides
+# Connect to Oracle (RACE_DATA)
 # ------------------------------------------------------------------------------
 
-metadata$datatype[metadata$colname == "weight_kg"] <- "NUMBER(38,3)"
-metadata$datatype[metadata$colname == "field_species_code"] <- "NUMBER(10,0)"
-metadata$datatype[metadata$colname == "notes"]     <- "VARCHAR2(4000 BYTE)"
+channel <- oracle_connect()
 
 
 # ------------------------------------------------------------------------------
-# Upload combined voucher table to Oracle
+# Preview, then update only new / changed rows
 # ------------------------------------------------------------------------------
 
-message("Uploading combined voucher table to Oracle...")
+# Preview: nothing is written
+res <- update_oracle_vouchers(vouchers, channel, dry_run = TRUE, overwrite_with_na = FALSE)
+# View(res$insert)
+# View(res$changes)
 
-gapindex::upload_oracle(
-  x                    = vouchers,
-  table_name           = "VOUCHERS",
-  table_metadata       = "Voucher table",
-  metadata_column      = metadata,
-  channel              = channel,
-  schema               = "RACE_DATA",
-  share_with_all_users = TRUE
-)
-
-message("Upload complete.")
+# Once the preview looks right, write to Oracle:
+# update_oracle_vouchers(vouchers, channel, dry_run = FALSE)

@@ -28,7 +28,7 @@ source("code/00_functions.R")
 
 
 # Oracle connection --------------------------------------------------------
-channel <- connect_oracle()
+channel <- oracle_connect()
 
 
 # Download Oracle data -------------------------------------------------------

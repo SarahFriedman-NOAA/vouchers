@@ -3,7 +3,7 @@
 # ==============================================================================
 
 VOUCHER_TABLE <- "RACE_DATA.VOUCHERS"
-VOUCHER_KEY   <- c("CRUISE", "VESSEL_ID", "HAUL", "VOUCHER", "FIELD_ID")
+VOUCHER_KEY <- c("CRUISE", "VESSEL_ID", "HAUL", "VOUCHER", "FIELD_ID")
 
 VOUCHER_COLS <- c(
   "hauljoin", "new_id", "new_species_code", "catalog_num", "region",
@@ -14,21 +14,49 @@ VOUCHER_COLS <- c(
 )
 
 
-# ------------------------------------------------------------------------------
-# Oracle connection (RACE_DATA)
-# ------------------------------------------------------------------------------
-
-connect_oracle <- function() {
-  if (file.exists("Z:/Projects/ConnectToOracle.R")) {
-    message("Using local Oracle connection script.")
-    source("Z:/Projects/ConnectToOracle.R")
-  } else {
-    message("Using gapindex::get_connected() fallback.")
-    gapindex::get_connected()
+#' Ensure an Active Oracle Connection Exists
+#' @description Checks if an RODBC channel exists and is alive using a test query. If missing or broken, it closes any stale handle and establishes a new connection.
+#' @param channel An existing RODBC channel object. If NULL, checks the calling environment.
+#' @param db The database name to pass to gapindex::get_connected() (default: "AFSC").
+#' @param check_access Logical, whether gapindex checks access levels (default: FALSE).
+#' @return An active, verified RODBC connection handle.
+oracle_connect <- function(channel = NULL, db = "AFSC", check_access = FALSE) {
+  # If channel not supplied directly, check if 'channel' exists in calling scope
+  if (is.null(channel)) {
+    if (exists("channel", envir = parent.frame())) {
+      channel <- get("channel", envir = parent.frame())
+    }
   }
-  get("channel", envir = globalenv())
-}
 
+  need_connect <- FALSE
+
+  if (is.null(channel)) {
+    message("Oracle channel does not exist. Connecting...")
+    need_connect <- TRUE
+  } else {
+    # 1. Test existing connection
+    test_result <- try(RODBC::sqlQuery(channel, "SELECT 1 FROM DUAL"), silent = TRUE)
+
+    # 2. Check if query threw an R error or returned an ODBC/Oracle error message
+    is_broken <- inherits(test_result, "try-error") ||
+      (is.character(test_result) && any(grepl("ERROR|ORA-", test_result, ignore.case = TRUE)))
+
+    if (is_broken) {
+      message("Oracle connection is broken or stale. Attempting to reconnect...")
+      try(RODBC::odbcClose(channel), silent = TRUE)
+      need_connect <- TRUE
+    } else {
+      message("Oracle connection is active and working.")
+    }
+  }
+
+  # Establish new connection if needed
+  if (need_connect) {
+    channel <- gapindex::get_connected(db = db, check_access = check_access)
+  }
+
+  channel
+}
 
 # ------------------------------------------------------------------------------
 # Standardize a voucher data frame to the Oracle table layout
@@ -37,33 +65,50 @@ connect_oracle <- function() {
 format_vouchers <- function(x, key = VOUCHER_KEY) {
   x <- as.data.frame(x)
   names(x) <- tolower(names(x))
-  
+
   missing <- setdiff(VOUCHER_COLS, names(x))
   if (length(missing) > 0) {
     message("Columns not in source data, set to NA: ", paste(missing, collapse = ", "))
     x[missing] <- NA
   }
-  
+
+  n_before <- nrow(x)
+
   x <- x[VOUCHER_COLS] %>%
     dplyr::mutate(
-      dplyr::across(c(cruise, year, vessel_id, haul, voucher,
-                      new_species_code, field_species_code, n_specimens), as.integer),
-      dplyr::across(c(hauljoin, standard_length_mm, weight_kg), as.numeric),
-      dplyr::across(c(new_id, catalog_num, region, field_id, preservative,
-                      collected_by, taxonomist, notes), as.character),
-      id_date = if (inherits(id_date, "Date")) id_date else
+      dplyr::across(c(
+        cruise, year, vessel_id, haul, voucher,
+        new_species_code, field_species_code, n_specimens
+      ), as.integer),
+      dplyr::across(c(hauljoin, weight_kg), as.numeric),
+      dplyr::across(c(
+        new_id, standard_length_mm, catalog_num, region, field_id, preservative,
+        collected_by, taxonomist, notes
+      ), as.character),
+      id_date = if (inherits(id_date, "Date")) {
+        id_date
+      } else {
         as.Date(id_date, format = "%m/%d/%Y")
+      }
     ) %>%
-    dplyr::distinct(dplyr::across(dplyr::all_of(tolower(key))), .keep_all = TRUE) %>%
+    dplyr::distinct(dplyr::across(dplyr::all_of(tolower(key))), .keep_all = TRUE)
+
+  if (nrow(x) < n_before) {
+    warning(sprintf("format_vouchers() silently dropped %d duplicate row(s) based on key.", n_before - nrow(x)))
+  }
+
+  x <- x %>%
     dplyr::arrange(year, cruise, vessel_id, haul, voucher) %>%
     dplyr::rename_with(toupper)
-  
+
   dups <- x %>% dplyr::filter(duplicated(CATALOG_NUM) & !is.na(CATALOG_NUM))
   if (nrow(dups) > 0) {
-    warning("Duplicate CATALOG_NUM values in new data:\n",
-            paste(unique(dups$CATALOG_NUM), collapse = ", "))
+    warning(
+      "Duplicate CATALOG_NUM values in new data:\n",
+      paste(unique(dups$CATALOG_NUM), collapse = ", ")
+    )
   }
-  
+
   x
 }
 
@@ -77,7 +122,8 @@ format_vouchers <- function(x, key = VOUCHER_KEY) {
     x <- format(as.Date(x), "%Y-%m-%d")
   } else if (is.numeric(x)) {
     x <- ifelse(is.na(x), NA_character_,
-                format(round(x, 6), trim = TRUE, scientific = FALSE))
+      format(round(x, 6), trim = TRUE, scientific = FALSE)
+    )
   } else {
     x <- trimws(as.character(x))
     x[x == ""] <- NA_character_
@@ -90,112 +136,545 @@ format_vouchers <- function(x, key = VOUCHER_KEY) {
 # Insert new rows / update changed rows in Oracle (no full re-upload)
 # ------------------------------------------------------------------------------
 
-update_oracle_vouchers <- function(new_data,
-                                   channel,
-                                   table   = VOUCHER_TABLE,
-                                   key     = VOUCHER_KEY,
-                                   dry_run = TRUE) {
-  
+# ------------------------------------------------------------------------------
+# SQL literal formatting
+# ------------------------------------------------------------------------------
+
+.oracle_sql_literal <- function(x) {
+  if (length(x) != 1) {
+    stop("Expected a single value.")
+  }
+
+  if (is.na(x)) {
+    return("NULL")
+  }
+
+  if (inherits(x, "Date")) {
+    return(sprintf(
+      "TO_DATE('%s', 'YYYY-MM-DD')",
+      format(x, "%Y-%m-%d")
+    ))
+  }
+
+  if (is.character(x)) {
+    if (x == "") {
+      return("NULL")
+    }
+
+    x <- gsub("'", "''", x, fixed = TRUE)
+    return(paste0("'", x, "'"))
+  }
+
+  if (is.logical(x)) {
+    return(ifelse(x, "1", "0"))
+  }
+
+  if (is.numeric(x)) {
+    if (!is.finite(x)) {
+      stop("Cannot write non-finite numeric value to Oracle.")
+    }
+
+    return(format(
+      x,
+      scientific = FALSE,
+      trim = TRUE,
+      digits = 15,
+      decimal.mark = "."
+    ))
+  }
+
+  stop("Unsupported column type: ", paste(class(x), collapse = "/"))
+}
+
+
+# ------------------------------------------------------------------------------
+# Normalize keys for matching ONLY
+# ------------------------------------------------------------------------------
+
+.normalize_key <- function(x) {
+  if (is.character(x)) {
+    x <- trimws(x)
+
+    # Treat literal "NA" as missing for key matching.
+    # The original Oracle value is preserved separately.
+    x[x %in% c("", "NA")] <- NA_character_
+  }
+
+  x
+}
+
+
+# ------------------------------------------------------------------------------
+# Construct WHERE clause from ORIGINAL Oracle key values
+# ------------------------------------------------------------------------------
+
+.oracle_where_clause <- function(key_row, key) {
+  paste(
+    vapply(key, function(col) {
+      value <- key_row[[col]]
+
+      if (is.na(value)) {
+        paste0(col, " IS NULL")
+      } else {
+        paste0(col, " = ", .oracle_sql_literal(value))
+      }
+    }, character(1)),
+    collapse = " AND "
+  )
+}
+
+
+# ------------------------------------------------------------------------------
+# Update one Oracle record
+# ------------------------------------------------------------------------------
+
+.oracle_update_row <- function(
+  channel,
+  row,
+  key_row,
+  table,
+  key,
+  update_cols
+) {
+  set_clause <- paste(
+    vapply(update_cols, function(col) {
+      paste0(col, " = ", .oracle_sql_literal(row[[col]]))
+    }, character(1)),
+    collapse = ", "
+  )
+
+  where_clause <- .oracle_where_clause(key_row, key)
+
+  sql <- paste(
+    "UPDATE", table,
+    "SET", set_clause,
+    "WHERE", where_clause
+  )
+
+  tryCatch(
+    {
+      result <- RODBC::sqlQuery(
+        channel,
+        sql,
+        errors = TRUE
+      )
+
+      if (is.character(result) && length(result) > 0) {
+        stop(paste(result, collapse = "\n"))
+      }
+    },
+    error = function(e) {
+      stop(
+        "Oracle update failed: ", conditionMessage(e),
+        "\nSQL: ", sql
+      )
+    }
+  )
+
+  invisible(TRUE)
+}
+
+
+# ------------------------------------------------------------------------------
+# Verify one Oracle record after an update
+# ------------------------------------------------------------------------------
+
+.oracle_verify_row <- function(
+  channel,
+  row,
+  key_row,
+  table,
+  key,
+  verify_cols
+) {
+  where_clause <- .oracle_where_clause(key_row, key)
+
+  sql <- paste(
+    "SELECT",
+    paste(verify_cols, collapse = ", "),
+    "FROM", table,
+    "WHERE", where_clause
+  )
+
+  actual <- RODBC::sqlQuery(
+    channel,
+    sql,
+    errors = TRUE,
+    stringsAsFactors = FALSE,
+    na.strings = character(0)
+  )
+
+  if (is.character(actual) && length(actual) > 0) {
+    stop(
+      "Oracle verification query failed: ",
+      paste(actual, collapse = "\n")
+    )
+  }
+
+  if (nrow(actual) != 1) {
+    stop(
+      "Oracle verification failed: expected exactly one matching row, ",
+      "but found ", nrow(actual), ".\n",
+      "WHERE: ", where_clause
+    )
+  }
+
+  mismatches <- verify_cols[
+    !vapply(verify_cols, function(col) {
+      identical(
+        unname(.norm(row[[col]])),
+        unname(.norm(actual[[col]]))
+      )
+    }, logical(1))
+  ]
+
+  if (length(mismatches) > 0) {
+    stop(
+      "Oracle verification failed. Values do not match for: ",
+      paste(mismatches, collapse = ", "),
+      "\nWHERE: ", where_clause
+    )
+  }
+
+  invisible(TRUE)
+}
+
+
+update_oracle_vouchers <- function(
+  new_data,
+  channel,
+  table = VOUCHER_TABLE,
+  key = VOUCHER_KEY,
+  dry_run = TRUE,
+  max_updates = 200,
+  overwrite_with_na = FALSE
+) {
   names(new_data) <- toupper(names(new_data))
-  
-  old_data <- RODBC::sqlQuery(channel, paste("SELECT * FROM", table),
-                              stringsAsFactors = FALSE)
+
+  # ---- Read Oracle data ------------------------------------------------------
+
+  old_data <- RODBC::sqlQuery(
+    channel,
+    paste0("SELECT * FROM ", table),
+    stringsAsFactors = FALSE,
+    na.strings = character(0)
+  )
+
+  if (is.character(old_data) && length(old_data) > 0) {
+    stop("Could not read Oracle table: ", paste(old_data, collapse = "\n"))
+  }
+
   names(old_data) <- toupper(names(old_data))
-  
+
   # ---- Sanity checks ---------------------------------------------------------
+
   missing_cols <- setdiff(names(new_data), names(old_data))
+
   if (length(missing_cols) > 0) {
-    stop("Columns not in Oracle table (schema change needs a full re-upload): ",
-         paste(missing_cols, collapse = ", "))
+    stop(
+      "Columns not in Oracle table (schema change needs a full re-upload): ",
+      paste(missing_cols, collapse = ", ")
+    )
   }
-  if (anyNA(new_data[key])) {
-    stop("NA values in key columns (", paste(key, collapse = ", "),
-         "). Fix before updating.")
-  }
-  if (anyDuplicated(new_data[key]) > 0) {
-    stop("Duplicate keys in new data: ", paste(key, collapse = ", "))
-  }
-  if (anyDuplicated(old_data[key]) > 0) {
-    warning("Existing Oracle table has duplicate keys; updates will hit every duplicate.")
-  }
-  
-  # Key columns must share a type across old/new
-  for (k in key) {
-    if (is.character(new_data[[k]])) {
-      new_data[[k]] <- trimws(new_data[[k]])
-      old_data[[k]] <- trimws(as.character(old_data[[k]]))
-    } else {
-      new_data[[k]] <- as.integer(new_data[[k]])
-      old_data[[k]] <- as.integer(old_data[[k]])
+
+  # ---- Clean character values without destroying literal "NA" ---------------
+
+  # Trim incoming values and convert empty strings to missing.
+  # Do NOT convert literal "NA" or "N/A" globally.
+
+  for (col in names(new_data)) {
+    if (is.character(new_data[[col]])) {
+      new_data[[col]] <- trimws(new_data[[col]])
+      new_data[[col]][new_data[[col]] == ""] <- NA_character_
     }
   }
-  
+
+  # Clean Oracle comparison columns, but preserve the ORIGINAL key values.
   compare_cols <- setdiff(names(new_data), key)
-  
-  # ---- New rows ---------------------------------------------------------------
-  to_insert <- dplyr::anti_join(new_data, old_data[key], by = key)
-  
-  # ---- Changed rows -----------------------------------------------------------
+
+  for (col in compare_cols) {
+    if (is.character(old_data[[col]])) {
+      old_data[[col]] <- trimws(old_data[[col]])
+      old_data[[col]][old_data[[col]] == ""] <- NA_character_
+    }
+  }
+
+  # ---- Create normalized key copies -----------------------------------------
+
+  # These copies are used only for matching.
+  # old_data itself retains the original Oracle key values.
+
+  new_key_data <- new_data
+  old_key_data <- old_data
+
+  for (k in key) {
+    if (is.character(new_key_data[[k]])) {
+      new_key_data[[k]] <- .normalize_key(new_key_data[[k]])
+      old_key_data[[k]] <- .normalize_key(old_key_data[[k]])
+    } else {
+      new_key_data[[k]] <- as.integer(new_key_data[[k]])
+      old_key_data[[k]] <- as.integer(old_key_data[[k]])
+    }
+  }
+
+  # ---- Check normalized key uniqueness --------------------------------------
+
+  if (anyDuplicated(new_key_data[key]) > 0) {
+    stop(
+      "Duplicate keys in new data after normalization: ",
+      paste(key, collapse = ", ")
+    )
+  }
+
+  if (anyDuplicated(old_key_data[key]) > 0) {
+    stop(
+      "Duplicate keys exist in Oracle after normalization. ",
+      "Cannot safely determine which records should be updated."
+    )
+  }
+
+  # ---- New rows --------------------------------------------------------------
+
+  to_insert <- new_data[
+    !vctrs::vec_in(
+      new_key_data[key],
+      old_key_data[key]
+    ), ,
+    drop = FALSE
+  ]
+
+  # ---- Match existing records ------------------------------------------------
+
+  # Keep the original Oracle key values alongside the normalized keys.
+  # These original values will be used in the SQL WHERE clauses.
+
+  oracle_key_cols <- paste0(".ORACLE_KEY_", seq_along(key))
+
+  old_match <- old_key_data[c(key, compare_cols)]
+
+  for (i in seq_along(key)) {
+    old_match[[oracle_key_cols[i]]] <- old_data[[key[i]]]
+  }
+
   matched <- dplyr::inner_join(
-    new_data, old_data[c(key, compare_cols)],
-    by = key, suffix = c("", ".OLD")
+    new_key_data,
+    old_match,
+    by = key,
+    suffix = c("", ".OLD")
   )
-  
+
+  # ---- Identify changed values ----------------------------------------------
+
   diff_by_col <- lapply(compare_cols, function(col) {
     a <- .norm(matched[[col]])
     b <- .norm(matched[[paste0(col, ".OLD")]])
-    dplyr::coalesce(a, "<NA>") != dplyr::coalesce(b, "<NA>")
+
+    changed <- dplyr::coalesce(a, "<NA>") != dplyr::coalesce(b, "<NA>")
+
+    if (!overwrite_with_na) {
+      # Cancel the change if new data is NA but Oracle currently has data
+      changed[is.na(a) & !is.na(b)] <- FALSE
+    }
+    changed
   })
+
   names(diff_by_col) <- compare_cols
-  
+
   changed_flag <- Reduce(`|`, diff_by_col)
-  to_update    <- matched[changed_flag, names(new_data), drop = FALSE]
-  
+
+  update_idx <- which(changed_flag)
+
+  to_update <- matched[
+    update_idx,
+    names(new_data),
+    drop = FALSE
+  ]
+
+  # Keep the actual Oracle key values separately for SQL operations.
+  oracle_keys_to_update <- matched[
+    update_idx,
+    oracle_key_cols,
+    drop = FALSE
+  ]
+
+  # Track exactly which columns changed for each record.
+  update_cols_by_row <- lapply(update_idx, function(i) {
+    names(diff_by_col)[
+      vapply(diff_by_col, function(x) x[i], logical(1))
+    ]
+  })
+
+  # ---- Change summary --------------------------------------------------------
+
   changes <- dplyr::bind_rows(lapply(compare_cols, function(col) {
     idx <- which(diff_by_col[[col]])
-    if (length(idx) == 0) return(NULL)
-    data.frame(matched[idx, key, drop = FALSE], COLUMN = col,
-               OLD = .norm(matched[[paste0(col, ".OLD")]])[idx],
-               NEW = .norm(matched[[col]])[idx],
-               stringsAsFactors = FALSE)
+
+    if (length(idx) == 0) {
+      return(NULL)
+    }
+
+    data.frame(
+      matched[idx, key, drop = FALSE],
+      COLUMN = col,
+      OLD = .norm(matched[[paste0(col, ".OLD")]])[idx],
+      NEW = .norm(matched[[col]])[idx],
+      stringsAsFactors = FALSE
+    )
   }))
-  
-  # ---- Catalog number clashes with rows already in Oracle ---------------------
+
+  # ---- Catalog number clashes -----------------------------------------------
+
   if ("CATALOG_NUM" %in% names(new_data)) {
-    old_cat <- old_data[!is.na(old_data$CATALOG_NUM), c(key, "CATALOG_NUM")]
-    new_cat <- new_data[!is.na(new_data$CATALOG_NUM), c(key, "CATALOG_NUM")]
+    old_cat <- old_key_data[
+      !is.na(old_data$CATALOG_NUM),
+      c(key, "CATALOG_NUM"),
+      drop = FALSE
+    ]
+
+    new_cat <- new_key_data[
+      !is.na(new_data$CATALOG_NUM),
+      c(key, "CATALOG_NUM"),
+      drop = FALSE
+    ]
+
     clash <- new_cat %>%
       dplyr::anti_join(old_cat, by = c(key, "CATALOG_NUM")) %>%
       dplyr::semi_join(old_cat["CATALOG_NUM"], by = "CATALOG_NUM")
+
     if (nrow(clash) > 0) {
-      warning("CATALOG_NUM already in Oracle under a different key/row:\n",
-              paste(unique(clash$CATALOG_NUM), collapse = ", "))
+      warning(
+        "CATALOG_NUM already in Oracle under a different key/row:\n",
+        paste(unique(clash$CATALOG_NUM), collapse = ", ")
+      )
     }
   }
-  
-  message(sprintf("Rows to INSERT: %d | Rows to UPDATE: %d | Unchanged: %d",
-                  nrow(to_insert), nrow(to_update),
-                  nrow(new_data) - nrow(to_insert) - nrow(to_update)))
-  
-  if (dry_run) {
-    message("dry_run = TRUE: nothing written. Review, then rerun with dry_run = FALSE.")
-    return(invisible(list(insert = to_insert, update = to_update, changes = changes)))
-  }
-  
-  # ---- Write ------------------------------------------------------------------
-  if (nrow(to_insert) > 0) {
-    RODBC::sqlSave(channel, as.data.frame(to_insert), tablename = table,
-                   append = TRUE, rownames = FALSE, safer = TRUE)
-  }
-  if (nrow(to_update) > 0) {
-    RODBC::sqlUpdate(channel, as.data.frame(to_update), tablename = table,
-                     index = key)
-  }
-  
-  message("Update complete.")
-  invisible(list(insert = to_insert, update = to_update, changes = changes))
-}
 
+  # ---- Summary ----------------------------------------------------------------
+
+  message(sprintf(
+    "Rows to INSERT: %d | Rows to UPDATE: %d | Unchanged: %d",
+    nrow(to_insert),
+    nrow(to_update),
+    nrow(new_data) - nrow(to_insert) - nrow(to_update)
+  ))
+
+  if (dry_run) {
+    message(
+      "dry_run = TRUE: nothing written. Review, then rerun with dry_run = FALSE."
+    )
+
+    return(invisible(list(
+      insert = to_insert,
+      update = to_update,
+      changes = changes
+    )))
+  }
+
+  # ---- Safety guardrail -------------------------------------------------------
+  if (nrow(to_update) > max_updates) {
+    stop(sprintf(
+      "ABORTED: Attempting to update %d rows, which exceeds max_updates (%d).",
+      nrow(to_update), max_updates
+    ))
+  }
+
+  if (nrow(new_data) < nrow(old_data) * 0.9) {
+    stop(
+      sprintf(
+        paste0(
+          "ABORTED: New dataset has %d rows, but Oracle currently has %d rows ",
+          "(a >10%% drop).\nIf this deletion is intentional, please ",
+          "truncate or update Oracle manually."
+        ),
+        nrow(new_data),
+        nrow(old_data)
+      )
+    )
+  }
+
+  # ---- Write ------------------------------------------------------------------
+  success <- FALSE
+  RODBC::odbcSetAutoCommit(channel, FALSE)
+
+  on.exit(
+    {
+      if (!success) {
+        message("Error encountered: rolling back transaction.")
+        RODBC::odbcEndTran(channel, commit = FALSE)
+      }
+      RODBC::odbcSetAutoCommit(channel, TRUE)
+    },
+    add = TRUE
+  )
+
+
+  # Insert new records.
+  if (nrow(to_insert) > 0) {
+    my_types <- c(ID_DATE = "DATE")
+
+    RODBC::sqlSave(
+      channel,
+      as.data.frame(to_insert),
+      tablename = table,
+      append = TRUE,
+      rownames = FALSE,
+      safer = TRUE,
+      fast = FALSE,
+      varTypes = my_types
+    )
+  }
+
+  # Update existing records.
+  if (nrow(to_update) > 0) {
+    message("Updating ", nrow(to_update), " Oracle records...")
+
+    for (i in seq_len(nrow(to_update))) {
+      key_row <- oracle_keys_to_update[i, , drop = FALSE]
+      names(key_row) <- key
+
+      .oracle_update_row(
+        channel = channel,
+        row = to_update[i, , drop = FALSE],
+        key_row = key_row,
+        table = table,
+        key = key,
+        update_cols = update_cols_by_row[[i]]
+      )
+    }
+
+    message("Verifying Oracle updates...")
+
+    for (i in seq_len(nrow(to_update))) {
+      key_row <- oracle_keys_to_update[i, , drop = FALSE]
+      names(key_row) <- key
+
+      .oracle_verify_row(
+        channel = channel,
+        row = to_update[i, , drop = FALSE],
+        key_row = key_row,
+        table = table,
+        key = key,
+        verify_cols = update_cols_by_row[[i]]
+      )
+    }
+
+    message(
+      "Successfully verified ",
+      nrow(to_update),
+      " updated Oracle records."
+    )
+  }
+
+  message("Update complete.")
+
+  success <- TRUE
+  RODBC::odbcEndTran(channel, commit = TRUE)
+
+  invisible(list(insert = to_insert, 
+                 update = to_update, 
+                 changes = changes)
+            )
+}
 
 
 # ------------------------------------------------------------------------------
@@ -213,16 +692,16 @@ update_oracle_vouchers <- function(new_data,
 #' - numeric   -> NUMBER
 #' - date      -> DATE
 # ------------------------------------------------------------------------------
-oracle_datatypes <- function(x) {
-  cl <- sapply(x, class)
-
-  cl[cl == "character"] <- "VARCHAR2(255 BYTE)"
-  cl[cl == "logical"] <- "NUMBER(1,0)"
-  cl[cl == "numeric"] <- "NUMBER"
-  cl[cl == "id_date"] <- "DATE"
-
-  cl
-}
+# oracle_datatypes <- function(x) {
+#   cl <- sapply(x, class)
+#
+#   cl[cl == "character"] <- "VARCHAR2(255 BYTE)"
+#   cl[cl == "logical"] <- "NUMBER(1,0)"
+#   cl[cl == "numeric"] <- "NUMBER"
+#   cl[cl == "id_date"] <- "DATE"
+#
+#   cl
+# }
 
 
 # ------------------------------------------------------------------------------
@@ -242,11 +721,25 @@ validate_species <- function(species_vec, taxonomy = NULL) {
   }
 
   results <- character(length(species_vec))
-  prompt_history <- integer(0) # Tracks indices of flagged items for 'back' functionality
-  i <- 1
+  prompt_history <- integer(0)
 
+  # NEW: Initialize cache and a flag for the 'back' feature
+  correction_cache <- list()
+  ignore_cache_once <- FALSE
+
+  i <- 1
   while (i <= length(species_vec)) {
     sp_input <- species_vec[i]
+    safe_key <- as.character(sp_input) # Ensure valid list name
+
+    # NEW: Check cache before running the interactive engine
+    if (!ignore_cache_once && !is.na(sp_input) && safe_key %in% names(correction_cache)) {
+      results[i] <- correction_cache[[safe_key]]
+      i <- i + 1
+      next
+    }
+
+    ignore_cache_once <- FALSE
     allow_back <- length(prompt_history) > 0
 
     # Run interactive engine on single item
@@ -260,14 +753,16 @@ validate_species <- function(species_vec, taxonomy = NULL) {
 
     # Handle 'b' / 'back' navigation jump
     if (identical(res$status, "BACK")) {
-      i <- prompt_history[length(prompt_history)] # Jump to previous flagged index
-      prompt_history <- prompt_history[-length(prompt_history)] # Pop from history stack
+      i <- prompt_history[length(prompt_history)]
+      prompt_history <- prompt_history[-length(prompt_history)]
+      ignore_cache_once <- TRUE # NEW: Force the prompt when returning to this index
       next
     }
 
     # If the species required user intervention, add index to history stack
     if (isTRUE(res$was_flagged)) {
       prompt_history <- c(prompt_history, i)
+      correction_cache[[safe_key]] <- res$value # NEW: Save the correction to cache
     }
 
     results[i] <- res$value
@@ -561,8 +1056,8 @@ validate_haul <- function(data, haul_data = NULL) {
 
   # Check column existence
   missing_data <- setdiff(req_cols, names(data))
-  missing_haul <- setdiff(req_cols, names(all_haul))
-
+  missing_haul <- setdiff(req_cols, names(haul_data))
+  
   if (length(missing_data) > 0) {
     stop("Input 'data' is missing required columns: ", paste(missing_data, collapse = ", "))
   }
@@ -575,7 +1070,7 @@ validate_haul <- function(data, haul_data = NULL) {
     dplyr::select(dplyr::all_of(req_cols)) %>%
     dplyr::distinct()
 
-  haul_keys <- all_haul %>%
+  haul_keys <- haul_data %>%
     dplyr::select(dplyr::all_of(req_cols)) %>%
     dplyr::distinct()
 
@@ -708,16 +1203,6 @@ get_species_code_single <- function(sp, allow_back = TRUE) {
   sp_raw <- trimws(sp)
   sp_clean <- stringr::str_remove(tolower(sp_raw), "\\.")
 
-  # --- SKIP OPEN NOMENCLATURE & UNCERTAIN SPECIES ---
-  # Check against raw string before period removal to catch all "sp. cf.", "sp.cf.", "sp. ", "sp."
-  if (grepl("(?i)\\bsp\\.?\\s*cf\\.|(?i)\\bsp\\.\\s|(?i)\\bsp\\.$", sp_raw)) {
-    return(data.frame(
-      valid_id = sp_raw,
-      species_code = NA_real_,
-      stringsAsFactors = FALSE
-    ))
-  }
-
   # --- STEP 1: Direct Exact Match Check ---
   tax_sp_clean <- stringr::str_remove(tolower(taxonomy$species_name), "\\.")
   tax_com_clean <- stringr::str_remove(tolower(taxonomy$common_name), "\\.")
@@ -731,6 +1216,16 @@ get_species_code_single <- function(sp, allow_back = TRUE) {
     sp_found <- taxonomy$common_name[exact_com_idx[1]]
   } else {
     sp_found <- NULL
+  }
+
+  # --- SKIP OPEN NOMENCLATURE & UNCERTAIN SPECIES ---
+  # ONLY skip if we didn't just find a valid exact match in Step 1
+  if (is.null(sp_found) && grepl("(?i)\\bsp\\.?\\s*cf\\.|(?i)\\bsp\\.\\s|(?i)\\bsp\\.$", sp_raw)) {
+    return(data.frame(
+      valid_id = sp_raw,
+      species_code = NA_real_,
+      stringsAsFactors = FALSE
+    ))
   }
 
   # --- STEP 2: Fuzzy Search Fallback & Narrowing ---
@@ -860,16 +1355,44 @@ get_species_code_single <- function(sp, allow_back = TRUE) {
 }
 
 
-get_species_code <- function(species_vec) {
+get_species_code <- function(species_vec, current_codes = NULL, na_only = TRUE) {
+  # Safety check
+  if (!is.null(current_codes) && length(current_codes) != length(species_vec) && na_only) {
+    stop("Length of 'current_codes' must match 'species_vec'.")
+  }
+
   results_list <- vector("list", length(species_vec))
   prompt_history <- integer(0)
 
+  correction_cache <- list()
+  ignore_cache_once <- FALSE
+
   i <- 1
   while (i <= length(species_vec)) {
+    # NEW: If a valid code already exists, keep it and skip to the next row
+    if (!is.null(current_codes) && !is.na(current_codes[i])) {
+      results_list[[i]] <- data.frame(
+        valid_id = as.character(species_vec[i]),
+        species_code = as.numeric(current_codes[i]),
+        stringsAsFactors = FALSE
+      )
+      i <- i + 1
+      next
+    }
+
     sp_input <- species_vec[i]
+    safe_key <- as.character(sp_input)
+
+    # Check cache before processing
+    if (!ignore_cache_once && !is.na(sp_input) && safe_key %in% names(correction_cache)) {
+      results_list[[i]] <- correction_cache[[safe_key]]
+      i <- i + 1
+      next
+    }
+
+    ignore_cache_once <- FALSE
     allow_back <- length(prompt_history) > 0
 
-    # Check if direct match will happen (to see if interactive prompt will trigger)
     sp_clean <- stringr::str_remove(tolower(trimws(sp_input)), "\\.")
     tax_sp_clean <- stringr::str_remove(tolower(taxonomy$species_name), "\\.")
     tax_com_clean <- stringr::str_remove(tolower(taxonomy$common_name), "\\.")
@@ -883,13 +1406,15 @@ get_species_code <- function(species_vec) {
     if (identical(res$valid_id, "BACK")) {
       i <- prompt_history[length(prompt_history)]
       prompt_history <- prompt_history[-length(prompt_history)]
+      ignore_cache_once <- TRUE
       next
     }
 
-    # Store item in prompt history if it required interactive resolution
+    # Store item in cache and history if it required interactive resolution
     if (interactive() && !is_direct_match && !is_sp_cf) {
       if (length(prompt_history) == 0 || prompt_history[length(prompt_history)] != i) {
         prompt_history <- c(prompt_history, i)
+        correction_cache[[safe_key]] <- res
       }
     }
 
@@ -897,5 +1422,8 @@ get_species_code <- function(species_vec) {
     i <- i + 1
   }
 
-  dplyr::bind_rows(results_list)
+  # Extract and return just the numeric species_code as a flat vector
+  extracted_codes <- sapply(results_list, function(x) x$species_code)
+  return(as.numeric(extracted_codes))
 }
+
