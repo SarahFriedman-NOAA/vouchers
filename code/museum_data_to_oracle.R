@@ -44,9 +44,6 @@ vessels <- tibble::tribble(
 
 # ---- CAL ACADEMY DATA --------------------------------------------------------
 
-# Update this path each time new museum data arrives
-museum_file <- "data/updates/voucher_inverts_cas_2024.xlsx"
-
 museum_data <- readxl::read_xlsx(museum_file) %>%
   janitor::clean_names() %>%
   tidyr::separate(

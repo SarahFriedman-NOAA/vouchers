@@ -28,14 +28,14 @@ source("code/vouchers_to_drive.R")
 
 
 # ------------------------------------------------------------------------------
-# 3. UPDATE ORACLE VOUCHER TABLE FROM GOOGLE DRIVE
+# 3. AFTER RE-ID OF VOUCHERS: UPDATE ORACLE VOUCHER TABLE FROM GOOGLE DRIVE
 # ------------------------------------------------------------------------------
 
 source("code/vouchers_to_oracle.R")
 
 
 # ------------------------------------------------------------------------------
-# 4. MUSEUM REQUEST: LOCALITY METADATA
+# 4. MUSEUM REQUEST: HAUL METADATA
 # ------------------------------------------------------------------------------
 
 specimen_data <- get_specimen_metadata(
@@ -52,5 +52,8 @@ view(specimen_data)
 # ------------------------------------------------------------------------------
 # 5. MUSEUM DATA INGEST → ORACLE
 # ------------------------------------------------------------------------------
+
+# Update this path each time new museum data arrives
+museum_file <- "data/updates/voucher_inverts_cas_2024.xlsx"
 
 source("code/museum_data_to_oracle.R")
