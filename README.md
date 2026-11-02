@@ -2,14 +2,7 @@
 
 This repository contains the R-based data pipeline for managing biological voucher specimens (fish and invertebrates) for the RACEBASE database. It handles the extraction of survey data from Oracle, synchronization of editable datasets with Google Drive, integration of external museum data (e.g., California Academy of Sciences, UW), and secure transaction-based uploads back into Oracle.
 
-## Table of Contents
-
-- [Overview](#overview)
-- [Prerequisites](#prerequisites)
-- [Project Structure](#project-structure)
-- [Usage](#usage)
-
-## Overview {#overview}
+## Overview
 
 The pipeline automates several critical tasks for the voucher specimen lifecycle:
 
@@ -21,7 +14,7 @@ The pipeline automates several critical tasks for the voucher specimen lifecycle
 
 4.  **Museum Harmonization:** Ingests external museum spreadsheets, harmonizes field identifiers with valid species codes, joins required haul metadata, and uploads final catalog numbers and identifications to Oracle.
 
-## Prerequisites {#prerequisites}
+## Prerequisites
 
 - **R** (\>= 4.0 recommended)
 - **Oracle Database Access:** You must have an active ODBC connection and credentials for the `AFSC` Oracle database, with write access to `RACE_DATA.VOUCHERS`.
@@ -35,7 +28,7 @@ install.packages(c("tidyverse", "RODBC", "here", "janitor", "googledrive", "getP
 
 *Note: The `gapindex` package is also required for Oracle connectivity.*
 
-## Project Structure {#project-structure}
+## Project Structure
 
 - `run.R`: The primary script.
 - `code/`
@@ -46,7 +39,7 @@ install.packages(c("tidyverse", "RODBC", "here", "janitor", "googledrive", "getP
   - `vouchers_to_oracle.R`: Downloads edited vouchers from Drive and updates the Oracle DB.
   - `museum_data_to_oracle.R`: Cleans and formats museum spreadsheet data to conform to Oracle standards.
 
-## Usage {#usage}
+## Usage
 
 To execute the pipeline, open `run.R`, configure your `target_year` (and toggle `override` if you need to bust the local cache), and source the specific scripts you need for your current task. When running scripts that invoke taxonomy checking, ensure you are running them interactively (e.g., in RStudio) so you can respond to the species resolution prompts. Recommended workflow:
 
