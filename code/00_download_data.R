@@ -56,7 +56,7 @@ cached_query <- function(query, file, channel, override = FALSE, max_age_days = 
 # 1. CORE TABLES (CACHED)
 # ==============================================================================
 
-if (!exists("target_year"))    stop("`target_year` must be defined.")
+if (!exists("survey_year"))    stop("`survey_year` must be defined.")
 
 # Species tables
 spec0 <- cached_query(
@@ -124,10 +124,10 @@ taxonomy <- dplyr::bind_rows(classification,
 
 survey_def_ids <- c(52, 47, 98, 78, 143)
 
-year_filter <- if (length(target_year) > 1) {
-  paste0("year IN (", paste(target_year, collapse = ", "), ")")
+year_filter <- if (length(survey_year) > 1) {
+  paste0("year IN (", paste(survey_year, collapse = ", "), ")")
 } else {
-  paste0("year = ", target_year)
+  paste0("year = ", survey_year)
 }
 
 query_cruise <- paste0(

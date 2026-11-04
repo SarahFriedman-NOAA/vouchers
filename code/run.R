@@ -8,7 +8,7 @@
 # 3. Append vouchers to Oracle table
 # 4. Process museum requests and uploads
 
-target_year <- as.numeric(format(Sys.time(), "%Y")) # year(s) for voucher extraction
+survey_year <- as.numeric(format(Sys.time(), "%Y")) # year(s) for voucher extraction
 # year <- c(2025, 2026)
 
 override <- FALSE # toggle to override cached tables and download fresh
@@ -55,5 +55,12 @@ view(specimen_data)
 
 # Update this path each time new museum data arrives
 museum_file <- "data/updates/voucher_inverts_cas_2024.xlsx"
+museum_data <- readxl::read_xlsx(museum_file) %>%
+  janitor::clean_names() %>%
+  tidyr::separate(
+    prev_no,
+    into    = c("cruise", "vessel", "haul", "voucher"),
+    convert = TRUE
+  )
 
 source("code/museum_data_to_oracle.R")

@@ -12,7 +12,7 @@
 vouch_data <- catch_year %>%
   dplyr::left_join(species0, by = "species_code") %>%
   dplyr::mutate(
-    year = target_year,
+    year = survey_year,
     
     # Classify taxon group based on species_code ranges
     taxon = dplyr::case_when(
@@ -66,7 +66,7 @@ vouch_data_fish <- vouch_data %>%
 # Write raw voucher file locally
 # ------------------------------------------------------------------------------
 
-fish_file <- paste0("voucher_data_", target_year, "_fish_raw.csv")
+fish_file <- paste0("voucher_data_", survey_year, "_fish_raw.csv")
 
 readr::write_csv(
   vouch_data_fish,
@@ -92,11 +92,11 @@ googledrive::drive_auth()
 # Define file + folder structure
 # ------------------------------------------------------------------------------
 
-raw_drive_name  <- paste0("voucher_data_", target_year, "_fish_raw")
-edit_drive_name <- paste0("voucher_data_", target_year, "_fish_edited")
+raw_drive_name  <- paste0("voucher_data_", survey_year, "_fish_raw")
+edit_drive_name <- paste0("voucher_data_", survey_year, "_fish_edited")
 
 # Expected edited filename
-edited_file <- paste0("voucher_data_", target_year, "_fish_edited.csv")
+edited_file <- paste0("voucher_data_", survey_year, "_fish_edited.csv")
 
 
 # ------------------------------------------------------------------------------
@@ -122,7 +122,7 @@ if (!raw_drive_name %in% raw_drive_files) {
     media    = here::here("output", "raw", fish_file),
     path     = googledrive::as_id(raw_drive_name),
     type     = "csv",
-    name     = paste0("voucher_data_", target_year, "_fish_raw"),
+    name     = paste0("voucher_data_", survey_year, "_fish_raw"),
     overwrite = FALSE
   )
 }
@@ -139,7 +139,7 @@ if (!edit_drive_name %in% edit_drive_files) {
     media     = here::here("output", "raw", fish_file),
     path      = googledrive::as_id(edit_drive_name),
     type      = "spreadsheet",
-    name      = paste0("voucher_data_", target_year, "_fish_edited"),
+    name      = paste0("voucher_data_", survey_year, "_fish_edited"),
     overwrite = FALSE
   )
 }

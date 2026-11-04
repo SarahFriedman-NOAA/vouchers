@@ -1,45 +1,40 @@
 -- =============================================================================
   -- AUDIT TABLE + TRIGGER FOR RACE_DATA.VOUCHERS
 -- =============================================================================
-  -- Run as RACE_DATA (or a user who can create tables/sequences/triggers in that
-                       -- schema). Run the sections in order. Written for Oracle 11g+ (sequence, not an
-                                                                                       -- identity column). I could not run this against Oracle from here, so test it in
--- a dev schema / copy of the table first.
---
-  -- What it records, per row changed in VOUCHERS:
-  --   * I / U / D, timestamp, DB user, OS user, host, IP, module, client info
+-- What it records, per row changed in VOUCHERS:
+--   * I / U / D, timestamp, DB user, OS user, host, IP, module, client info
 --   * full OLD_* and NEW_* row images (OLD is NULL on insert, NEW on delete)
 --   * CHANGED_COLUMNS (updates only), e.g. 'NEW_ID,TAXONOMIST'
 --   * UPDATEs that change nothing are NOT logged
 --
-  -- Not captured: TRUNCATE, DROP/ALTER (DDL), anyone who disables the trigger.
+-- Not captured: TRUNCATE, DROP/ALTER (DDL), anyone who disables the trigger.
 -- If the VOUCHERS columns change, the audit table and trigger must be updated.
 -- =============================================================================
   
   
-  -- -----------------------------------------------------------------------------
-  -- 0. Check the column types (the audit table copies them automatically in step 2)
 -- -----------------------------------------------------------------------------
-  -- SELECT column_name, data_type, data_length, nullable
+-- 0. Check the column types (the audit table copies them automatically in step 2)
+-- -----------------------------------------------------------------------------
+-- SELECT column_name, data_type, data_length, nullable
 -- FROM   all_tab_columns
 -- WHERE  owner = 'RACE_DATA' AND table_name = 'VOUCHERS'
 -- ORDER  BY column_id;
 
 
 -- -----------------------------------------------------------------------------
-  -- 1. Sequence for the audit primary key
+-- 1. Sequence for the audit primary key
 -- -----------------------------------------------------------------------------
   CREATE SEQUENCE race_data.vouchers_audit_seq START WITH 1 INCREMENT BY 1 CACHE 20;
 
 
 -- -----------------------------------------------------------------------------
-  -- 2. Audit table
+-- 2. Audit table
 --    OLD_/NEW_ columns are created with CREATE TABLE AS SELECT ... WHERE 1 = 0 so
 --    they get exactly the same datatypes/lengths as VOUCHERS. This matters: if an
 --    audit column were too small, the trigger would fail and block the voucher
 --    write itself.
 -- -----------------------------------------------------------------------------
-  CREATE TABLE race_data.vouchers_audit AS
+  CREATE TABLE race_data.audit_vouchers AS
 SELECT
 CAST(NULL AS NUMBER)           AS audit_id,
 CAST(NULL AS VARCHAR2(1))      AS action,           -- I / U / D
@@ -94,20 +89,20 @@ notes                AS new_notes
 FROM race_data.vouchers
 WHERE 1 = 0;
 
-ALTER TABLE race_data.vouchers_audit MODIFY (audit_id NOT NULL, action NOT NULL, audit_ts NOT NULL);
-ALTER TABLE race_data.vouchers_audit ADD CONSTRAINT vouchers_audit_pk PRIMARY KEY (audit_id);
-ALTER TABLE race_data.vouchers_audit ADD CONSTRAINT vouchers_audit_action_ck CHECK (action IN ('I','U','D'));
-CREATE INDEX race_data.vouchers_audit_ts_ix ON race_data.vouchers_audit (audit_ts);
+ALTER TABLE race_data.audit_vouchers MODIFY (audit_id NOT NULL, action NOT NULL, audit_ts NOT NULL);
+ALTER TABLE race_data.audit_vouchers ADD CONSTRAINT audit_vouchers_pk PRIMARY KEY (audit_id);
+ALTER TABLE race_data.audit_vouchers ADD CONSTRAINT audit_vouchers_action_ck CHECK (action IN ('I','U','D'));
+CREATE INDEX race_data.audit_vouchers ON race_data.audit_vouchers (audit_ts);
 
-COMMENT ON TABLE race_data.vouchers_audit IS 'Row-level change log for RACE_DATA.VOUCHERS, maintained by trigger TRG_VOUCHERS_AUDIT. Do not edit.';
+COMMENT ON TABLE race_data.audit_vouchers IS 'Row-level change log for RACE_DATA.VOUCHERS, maintained by trigger AIUDR_VOUCHERS_AUDIT. Do not edit.';
 
 
 -- -----------------------------------------------------------------------------
-  -- 3. Trigger
+-- 3. Trigger
 --    Deliberately does NOT swallow errors: if the audit insert fails, the voucher
 --    change fails too, so there are no unaudited changes.
 -- -----------------------------------------------------------------------------
-  CREATE OR REPLACE TRIGGER race_data.trg_vouchers_audit
+  CREATE OR REPLACE TRIGGER race_data.aiudr_vouchers_audit
 AFTER INSERT OR UPDATE OR DELETE ON race_data.vouchers
 FOR EACH ROW
 DECLARE

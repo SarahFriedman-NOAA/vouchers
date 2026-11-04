@@ -3,7 +3,7 @@
 # ==============================================================================
 
 VOUCHER_TABLE <- "RACE_DATA.VOUCHERS"
-VOUCHER_KEY <- c("CRUISE", "VESSEL_ID", "HAUL", "VOUCHER", "FIELD_ID")
+VOUCHER_KEY <- c("CRUISE", "VESSEL_ID", "HAUL", "VOUCHER", "FIELD_ID", "NEW_ID")
 
 VOUCHER_COLS <- c(
   "hauljoin", "new_id", "new_species_code", "catalog_num", "region",
@@ -595,6 +595,8 @@ update_oracle_vouchers <- function(
   # ---- Write ------------------------------------------------------------------
   success <- FALSE
   RODBC::odbcSetAutoCommit(channel, FALSE)
+  
+  # ... [transaction code continues] ...
 
   on.exit(
     {

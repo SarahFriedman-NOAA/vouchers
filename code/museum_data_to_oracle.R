@@ -44,14 +44,6 @@ vessels <- tibble::tribble(
 
 # ---- CAL ACADEMY DATA --------------------------------------------------------
 
-museum_data <- readxl::read_xlsx(museum_file) %>%
-  janitor::clean_names() %>%
-  tidyr::separate(
-    prev_no,
-    into    = c("cruise", "vessel", "haul", "voucher"),
-    convert = TRUE
-  )
-
 # Double check all cruise/vessel/haul combinations exist
 stopifnot(isTRUE(validate_haul(museum_data, all_haul)))
 
